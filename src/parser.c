@@ -4,31 +4,94 @@
 #include <string.h>
 #include <arpa/inet.h>
 
-// Global parser state (reserved for future use)
+// Radiotap present field bit positions
+#define RADIOTAP_PRESENT_TSFT              0
+#define RADIOTAP_PRESENT_FLAGS             1
+#define RADIOTAP_PRESENT_RATE              2
+#define RADIOTAP_PRESENT_CHANNEL           3
+#define RADIOTAP_PRESENT_FHSS              4
+#define RADIOTAP_PRESENT_DBM_ANTSIGNAL     5
+#define RADIOTAP_PRESENT_DBM_ANTNOISE      6
+#define RADIOTAP_PRESENT_LOCK_QUALITY      7
+#define RADIOTAP_PRESENT_TX_ATTENUATION    8
+#define RADIOTAP_PRESENT_DB_TX_ATTENUATION 9
+#define RADIOTAP_PRESENT_DBM_TX_POWER     10
+#define RADIOTAP_PRESENT_ANTENNA          11
+#define RADIOTAP_PRESENT_DB_ANTSIGNAL     12
+#define RADIOTAP_PRESENT_DB_ANTNOISE      13
+
+// Channel frequencies for 802.11
+static const int channel_frequencies[] = {
+    0,      // channel 0 (invalid)
+    2412,   // ch 1
+    2417,   // ch 2
+    2422,   // ch 3
+    2427,   // ch 4
+    2432,   // ch 5
+    2437,   // ch 6
+    2442,   // ch 7
+    2447,   // ch 8
+    2452,   // ch 9
+    2457,   // ch 10
+    2462,   // ch 11
+    2467,   // ch 12
+    2472,   // ch 13
+    2484    // ch 14
+};
+
+// Convert frequency to channel number
+static int freq_to_channel(int freq) {
+    for (int i = 1; i <= 14; i++) {
+        if (channel_frequencies[i] == freq) {
+            return i;
+        }
+    }
+    // Fallback calculation for non-standard frequencies
+    if (freq >= 2412 && freq <= 2484) {
+        return (freq - 2407) / 5;
+    }
+    return 0;
+}
+
+// Get size of each radiotap field based on bit position
+static int radiotap_field_size(int bit) {
+    switch (bit) {
+        case RADIOTAP_PRESENT_TSFT:              return 8;  // uint64
+        case RADIOTAP_PRESENT_FLAGS:             return 1;  // uint8
+        case RADIOTAP_PRESENT_RATE:              return 1;  // uint8
+        case RADIOTAP_PRESENT_CHANNEL:           return 4;  // uint16 + uint16 (freq + flags)
+        case RADIOTAP_PRESENT_FHSS:              return 2;  // uint8 + uint8
+        case RADIOTAP_PRESENT_DBM_ANTSIGNAL:     return 1;  // int8 (dBm)
+        case RADIOTAP_PRESENT_DBM_ANTNOISE:      return 1;  // int8 (dBm)
+        case RADIOTAP_PRESENT_LOCK_QUALITY:      return 2;  // uint16
+        case RADIOTAP_PRESENT_TX_ATTENUATION:    return 2;  // uint16
+        case RADIOTAP_PRESENT_DB_TX_ATTENUATION: return 2;  // uint16
+        case RADIOTAP_PRESENT_DBM_TX_POWER:      return 1;  // int8
+        case RADIOTAP_PRESENT_ANTENNA:           return 1;  // uint8
+        case RADIOTAP_PRESENT_DB_ANTSIGNAL:      return 1;  // uint8
+        case RADIOTAP_PRESENT_DB_ANTNOISE:       return 1;  // uint8
+        default: return 0; // Unknown field
+    }
+}
+
+// Pad to alignment boundary
+static int align(int offset, int alignment) {
+    return (offset + alignment - 1) & ~(alignment - 1);
+}
+
 void parser_init(void) {
-    // Initialize any global state if needed
 }
 
 // Extract SSID from Information Elements
 int extract_ssid(const uint8_t *frame_body, int body_len, char *ssid_out, int ssid_max_len) {
-    int offset = 0;
+    if (body_len < 12) return -1;
 
-    // Skip fixed fields (timestamp 8 bytes + beacon interval 2 bytes + capability 2 bytes)
-    // For beacon: 12 bytes, for probe response: 12 bytes
-    // We'll handle both by checking the frame body
+    int offset = 12; // Skip timestamp(8) + beacon interval(2) + capability(2)
 
-    // Skip fixed parameters (assume beacon/probe response format)
-    if (body_len < 12) {
-        return -1;
-    }
-    offset = 12; // Skip timestamp(8) + beacon interval(2) + capability(2)
-
-    // Parse Information Elements
     while (offset < body_len - 2) {
         uint8_t ie_id = frame_body[offset];
         uint8_t ie_len = frame_body[offset + 1];
 
-        // SSID IE (ID = 0)
         if (ie_id == 0 && ie_len > 0) {
             int copy_len = ie_len;
             if (copy_len >= ssid_max_len) {
@@ -39,10 +102,31 @@ int extract_ssid(const uint8_t *frame_body, int body_len, char *ssid_out, int ss
             return copy_len;
         }
 
-        offset += 2 + ie_len; // Move to next IE
+        offset += 2 + ie_len;
     }
 
-    return -1; // SSID not found
+    return -1;
+}
+
+// Extract channel from DS Parameter Set IE (ID = 3)
+static int extract_channel_from_body(const uint8_t *body, int body_len) {
+    if (body_len < 12) return 0;
+
+    int offset = 12;
+
+    while (offset < body_len - 2) {
+        uint8_t ie_id = body[offset];
+        uint8_t ie_len = body[offset + 1];
+
+        // DS Parameter Set IE (ID = 3, length = 1)
+        if (ie_id == 3 && ie_len == 1) {
+            return body[offset + 2];
+        }
+
+        offset += 2 + ie_len;
+    }
+
+    return 0;
 }
 
 // Get frame type name
@@ -80,32 +164,65 @@ const char* get_frame_subtype_name(uint16_t type, uint16_t subtype) {
     return "Unknown";
 }
 
-// Parse radiotap header
+// Parse radiotap header - properly walk the bitmap
 static int parse_radiotap(const uint8_t *packet, int length, struct parsed_packet *pkt) {
-    if (length < sizeof(struct radiotap_header)) {
+    if (length < 8) {
         return -1;
     }
 
-    const struct radiotap_header *rt = (const struct radiotap_header *)packet;
+    uint8_t version = packet[0];
+    // uint8_t pad = packet[1];
+    uint16_t rt_len = packet[2] | (packet[3] << 8);
+    uint32_t present = packet[4] | (packet[5] << 8) | (packet[6] << 16) | (packet[7] << 24);
 
-    // Check version
-    if (rt->version != 0) {
+    if (version != 0 || rt_len > length) {
         return -1;
     }
 
-    int rt_len = rt->length;
-    if (rt_len > length) {
-        return -1;
+    // Walk through present fields to find offsets
+    int offset = 8; // Start after the fixed radiotap header (version + pad + length + present)
+    int signal_offset = -1;
+    int channel_offset = -1;
+
+    for (int bit = 0; bit < 32; bit++) {
+        if (present & (1 << bit)) {
+            int field_size = radiotap_field_size(bit);
+            if (field_size == 0) {
+                // Unknown field - can't continue
+                break;
+            }
+
+            if (bit == RADIOTAP_PRESENT_DBM_ANTSIGNAL) {
+                signal_offset = offset;
+            }
+            if (bit == RADIOTAP_PRESENT_CHANNEL) {
+                channel_offset = offset;
+            }
+
+            // Align to field's natural alignment
+            if (bit == RADIOTAP_PRESENT_TSFT) {
+                offset = align(offset, 8);
+            } else if (bit == RADIOTAP_PRESENT_CHANNEL ||
+                       bit == RADIOTAP_PRESENT_LOCK_QUALITY ||
+                       bit == RADIOTAP_PRESENT_TX_ATTENUATION ||
+                       bit == RADIOTAP_PRESENT_DB_TX_ATTENUATION) {
+                offset = align(offset, 2);
+            }
+
+            offset += field_size;
+        }
     }
 
-    // Try to extract signal strength if present
-    // Radiotap fields are bitmap-based, simplified extraction
-    if (rt->present & (1 << 18)) { // Bit 18: SS (signal strength in dBm)
-        // Signal strength is at a variable offset, simplified here
+    // Extract signal strength (dBm)
+    if (signal_offset >= 0 && signal_offset < rt_len) {
         pkt->has_signal = 1;
-        // Note: Actual offset calculation requires walking all present flags
-        // For now, we'll set a default
-        pkt->signal_dbm = -50; // Placeholder
+        pkt->signal_dbm = (int8_t)packet[signal_offset];
+    }
+
+    // Extract channel from radiotap frequency
+    if (channel_offset >= 0 && (channel_offset + 3) < rt_len) {
+        uint16_t freq = packet[channel_offset] | (packet[channel_offset + 1] << 8);
+        pkt->channel = freq_to_channel(freq);
     }
 
     return rt_len;
@@ -113,45 +230,34 @@ static int parse_radiotap(const uint8_t *packet, int length, struct parsed_packe
 
 // Parse 802.11 MAC header
 static int parse_mac_header(const uint8_t *frame, int length, struct parsed_packet *pkt) {
-    if (length < sizeof(struct wifi_mac_header)) {
+    if (length < 24) {
         return -1;
     }
 
     const struct wifi_mac_header *hdr = (const struct wifi_mac_header *)frame;
 
-    // Extract frame control fields
     pkt->frame_type = hdr->fc.type;
     pkt->frame_subtype = hdr->fc.subtype;
     pkt->is_protected = hdr->fc.protected_frame;
 
-    // Extract addresses based on To DS / From DS flags
     int to_ds = hdr->fc.to_ds;
     int from_ds = hdr->fc.from_ds;
 
     if (!to_ds && !from_ds) {
-        // Ad-hoc or management frame
-        // addr1 = DA, addr2 = SA, addr3 = BSSID
         memcpy(pkt->dst_mac, hdr->addr1, 6);
         memcpy(pkt->src_mac, hdr->addr2, 6);
         memcpy(pkt->bssid, hdr->addr3, 6);
     } else if (to_ds && !from_ds) {
-        // Station → AP
-        // addr1 = BSSID, addr2 = SA, addr3 = DA
         memcpy(pkt->bssid, hdr->addr1, 6);
         memcpy(pkt->src_mac, hdr->addr2, 6);
         memcpy(pkt->dst_mac, hdr->addr3, 6);
     } else if (!to_ds && from_ds) {
-        // AP → Station
-        // addr1 = DA, addr2 = BSSID, addr3 = SA
         memcpy(pkt->dst_mac, hdr->addr1, 6);
         memcpy(pkt->bssid, hdr->addr2, 6);
         memcpy(pkt->src_mac, hdr->addr3, 6);
     } else {
-        // WDS (Wireless Distribution System)
-        // addr1 = RA, addr2 = TA, addr3 = DA, addr4 = SA
         memcpy(pkt->dst_mac, hdr->addr1, 6);
         memcpy(pkt->src_mac, hdr->addr2, 6);
-        // BSSID not clearly defined in WDS
         memset(pkt->bssid, 0, 6);
     }
 
@@ -164,7 +270,6 @@ static void parse_beacon_body(const uint8_t *body, int body_len, struct parsed_p
         return;
     }
 
-    // Fixed parameters
     pkt->beacon_interval = ntohs(*(uint16_t *)(body + 8));
     pkt->capability = ntohs(*(uint16_t *)(body + 10));
 
@@ -174,12 +279,15 @@ static void parse_beacon_body(const uint8_t *body, int body_len, struct parsed_p
         pkt->ssid[0] = '\0';
         pkt->ssid_len = 0;
     }
+
+    // Extract channel from DS Parameter Set IE (if not already set from radiotap)
+    if (pkt->channel == 0) {
+        pkt->channel = extract_channel_from_body(body, body_len);
+    }
 }
 
 // Detect EAPOL frames
 static void detect_eapol(const uint8_t *frame, int length, struct parsed_packet *pkt) {
-    // Check for LLC/SNAP header with EAPOL ethertype
-    // LLC/SNAP: AA AA 03 00 00 00 88 8E
     if (length >= 8) {
         if (frame[0] == 0xAA && frame[1] == 0xAA && frame[2] == 0x03 &&
             frame[3] == 0x00 && frame[4] == 0x00 && frame[5] == 0x00) {
@@ -200,22 +308,19 @@ struct parsed_packet parse_packet(const uint8_t *packet, int length) {
     pkt.raw_data = packet;
     pkt.raw_len = length;
 
-    // Parse radiotap header
     int rt_len = parse_radiotap(packet, length, &pkt);
     if (rt_len < 0) {
-        return pkt; // Invalid radiotap
+        return pkt;
     }
 
-    // Parse MAC header
     const uint8_t *frame = packet + rt_len;
     int frame_len = length - rt_len;
 
     int mac_len = parse_mac_header(frame, frame_len, &pkt);
     if (mac_len < 0) {
-        return pkt; // Invalid MAC header
+        return pkt;
     }
 
-    // Parse body based on frame type
     const uint8_t *body = frame + mac_len;
     int body_len = frame_len - mac_len;
 
@@ -225,7 +330,6 @@ struct parsed_packet parse_packet(const uint8_t *packet, int length) {
             parse_beacon_body(body, body_len, &pkt);
         }
     } else if (pkt.frame_type == WIFI_FRAME_TYPE_DATA) {
-        // Check for EAPOL
         detect_eapol(body, body_len, &pkt);
     }
 
@@ -255,7 +359,6 @@ void print_parsed_packet(const struct parsed_packet *pkt) {
     printf("\n");
     printf("  Src: %s | Dst: %s | BSSID: %s\n", src_str, dst_str, bssid_str);
 
-    // Print beacon-specific info
     if (pkt->frame_type == WIFI_FRAME_TYPE_MANAGEMENT) {
         if (pkt->frame_subtype == WIFI_SUBTYPE_BEACON ||
             pkt->frame_subtype == WIFI_SUBTYPE_PROBE_RESP) {
@@ -265,7 +368,6 @@ void print_parsed_packet(const struct parsed_packet *pkt) {
         }
     }
 
-    // Print EAPOL detection
     if (pkt->is_eapol) {
         printf("  *** EAPOL DETECTED ***\n");
     }
