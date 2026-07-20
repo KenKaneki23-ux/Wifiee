@@ -15,4 +15,8 @@ int disable_monitor_mode(const char *iface_name);
 // Returns mode string (e.g., "monitor", "managed")
 const char* get_interface_mode(const char *iface_name);
 
+// Ensure interface is in monitor mode (re-enable if dropped)
+// Returns 0 on success, -1 on failure
+int ensure_monitor_mode(const char *iface_name);
+
 #endif // MONITOR_H

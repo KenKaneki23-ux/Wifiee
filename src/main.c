@@ -377,6 +377,7 @@ int main(int argc, char *argv[]) {
     log_info("Found %d access points", ap_count);
 
     // Phase 2: Let user select target (if not already specified)
+    int target_channel = 0;
     if (!scanner.has_target) {
         printf("\n");
         log_info("Phase 2: Select target network");
@@ -388,7 +389,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Set channel to target network's channel
-        int target_channel = scanner.aps[target_idx].channel;
+        target_channel = scanner.aps[target_idx].channel;
         log_info("Switching to channel %d for target...", target_channel);
         if (capture_set_channel(&cap, target_channel) < 0) {
             log_error("Failed to set channel %d", target_channel);
@@ -398,14 +399,23 @@ int main(int argc, char *argv[]) {
         // BSSID was specified, find its channel
         struct ap_info *target = scanner_find_ap(&scanner, target_bssid);
         if (target && target->channel > 0) {
-            log_info("Target found on channel %d", target->channel);
-            capture_set_channel(&cap, target->channel);
+            target_channel = target->channel;
+            log_info("Target found on channel %d", target_channel);
+            capture_set_channel(&cap, target_channel);
         }
     }
 
     // Phase 3: Capture handshake on target
     printf("\n");
     log_info("Phase 3: Capturing handshake on target...");
+
+    // Re-verify monitor mode (NetworkManager may have reclaimed it during scan)
+    ensure_monitor_mode(global_iface_name);
+
+    // Re-lock channel to target
+    if (target_channel > 0) {
+        capture_set_channel(&cap, target_channel);
+    }
 
     // Send deauth packets if enabled
     if (opts.deauth) {

@@ -48,9 +48,13 @@ static int set_monitor_mode_iwconfig(const char *iface_name) {
 // Kill interfering processes (NetworkManager, wpa_supplicant, etc.)
 static void kill_interfering_processes(void) {
     log_info("Killing interfering processes...");
-    exec_cmd("killall wpa_supplicant 2>/dev/null");
-    exec_cmd("killall dhclient 2>/dev/null");
-    exec_cmd("killall hostapd 2>/dev/null");
+    exec_cmd("systemctl stop NetworkManager 2>/dev/null");
+    exec_cmd("killall -9 NetworkManager 2>/dev/null");
+    exec_cmd("killall -9 wpa_supplicant 2>/dev/null");
+    exec_cmd("killall -9 dhclient 2>/dev/null");
+    exec_cmd("killall -9 dhcpcd 2>/dev/null");
+    exec_cmd("killall -9 hostapd 2>/dev/null");
+    exec_cmd("killall -9 avahi-daemon 2>/dev/null");
     usleep(500000);
 }
 
@@ -148,4 +152,13 @@ const char* get_interface_mode(const char *iface_name) {
 
     strncpy(mode, "unknown", sizeof(mode) - 1);
     return mode;
+}
+
+int ensure_monitor_mode(const char *iface_name) {
+    const char *mode = get_interface_mode(iface_name);
+    if (strcmp(mode, "monitor") == 0) {
+        return 0;
+    }
+    log_warning("Interface dropped out of monitor mode (now: %s), re-enabling...", mode);
+    return enable_monitor_mode(iface_name);
 }
