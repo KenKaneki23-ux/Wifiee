@@ -45,6 +45,18 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
         debug_data_frames++;
     }
 
+    // Debug: log all non-beacon data frames to see what's flowing
+    if (pkt.frame_type == WIFI_FRAME_TYPE_DATA && !pkt.is_eapol) {
+        if (debug_data_frames <= 5 || debug_data_frames % 50 == 0) {
+            char src_str[18], dst_str[18];
+            mac_to_str(pkt.src_mac, src_str);
+            mac_to_str(pkt.dst_mac, dst_str);
+            log_info("[DATA] subtype=%d src=%s dst=%s bssid=%s protected=%d",
+                     pkt.frame_subtype, src_str, dst_str,
+                     pkt.bssid[0] ? "(set)" : "(not set)", pkt.is_protected);
+        }
+    }
+
     if (pkt.is_eapol) {
         debug_eapol_detects++;
         char src_str[18], dst_str[18], bssid_str[18];

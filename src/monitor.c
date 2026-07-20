@@ -118,17 +118,27 @@ int disable_monitor_mode(const char *iface_name) {
     set_interface_down(iface_name);
     usleep(200000);
 
+    // Try iw first
     char cmd[128];
-    snprintf(cmd, sizeof(cmd), "iw %s set type managed 2>/dev/null", iface_name);
-    if (exec_cmd(cmd) != 0) {
-        snprintf(cmd, sizeof(cmd), "iwconfig %s mode managed 2>/dev/null", iface_name);
-        exec_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "iw %s set type managed 2>&1", iface_name);
+    int ret = system(cmd);
+
+    if (ret != 0) {
+        // Fallback: iwconfig
+        snprintf(cmd, sizeof(cmd), "iwconfig %s mode managed 2>&1", iface_name);
+        system(cmd);
     }
 
     set_interface_up(iface_name);
     usleep(200000);
 
-    log_success("Interface %s restored to managed mode", iface_name);
+    // Verify
+    const char *mode = get_interface_mode(iface_name);
+    if (strcmp(mode, "managed") == 0) {
+        log_success("Interface %s restored to managed mode", iface_name);
+    } else {
+        log_warning("Interface mode is '%s' (expected 'managed')", mode);
+    }
     return 0;
 }
 

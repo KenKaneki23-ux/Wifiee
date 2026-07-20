@@ -73,19 +73,31 @@ void capture_close(struct capture_handle *handle) {
 }
 
 int capture_set_channel(struct capture_handle *handle, int channel) {
-    struct iwreq wrq;
-
     if (channel < 1 || channel > 14) {
         log_error("Invalid channel: %d (must be 1-14)", channel);
         return -1;
     }
 
+    // Use iw (preferred method)
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "iw %s set channel %d 2>/dev/null", handle->iface, channel);
+    if (system(cmd) == 0) {
+        handle->channel = channel;
+        return 0;
+    }
+
+    // Fallback: iwconfig
+    snprintf(cmd, sizeof(cmd), "iwconfig %s channel %d 2>/dev/null", handle->iface, channel);
+    if (system(cmd) == 0) {
+        handle->channel = channel;
+        return 0;
+    }
+
+    // Fallback: ioctl
+    struct iwreq wrq;
     memset(&wrq, 0, sizeof(wrq));
     strncpy(wrq.ifr_name, handle->iface, IFNAMSIZ - 1);
 
-    // Set frequency (channel to frequency conversion)
-    // channels 1-13: 2407 + (channel * 5)
-    // channel 14: 2484
     int freq;
     if (channel == 14) {
         freq = 2484;
@@ -94,10 +106,10 @@ int capture_set_channel(struct capture_handle *handle, int channel) {
     }
 
     wrq.u.freq.m = freq;
-    wrq.u.freq.e = 6; // MHz
+    wrq.u.freq.e = 6;
 
     if (ioctl(handle->fd, SIOCSIWFREQ, &wrq) < 0) {
-        log_error("Failed to set channel %d", channel);
+        log_error("Failed to set channel %d (all methods failed)", channel);
         return -1;
     }
 
