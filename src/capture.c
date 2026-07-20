@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
+#include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -13,7 +15,6 @@
 int capture_init(struct capture_handle *handle, const char *iface_name) {
     struct sockaddr_ll sll;
     struct ifreq ifr;
-    int optval = 1;
 
     memset(handle, 0, sizeof(*handle));
     strncpy(handle->iface, iface_name, sizeof(handle->iface) - 1);
