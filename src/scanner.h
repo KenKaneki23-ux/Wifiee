@@ -67,4 +67,7 @@ int scanner_send_deauth(struct capture_handle *cap,
 // Get channel list (1-14)
 void scanner_get_channels(int *channels, int *num_channels);
 
+// Print debug stats
+void scanner_print_debug_stats(void);
+
 #endif // SCANNER_H

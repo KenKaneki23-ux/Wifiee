@@ -456,6 +456,7 @@ int main(int argc, char *argv[]) {
         // Print status every 10 seconds
         if ((time(NULL) - capture_start) % 10 == 0) {
             handshake_print_status(&handshake);
+            scanner_print_debug_stats();
         }
     }
 

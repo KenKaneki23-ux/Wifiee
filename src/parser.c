@@ -286,15 +286,20 @@ static void parse_beacon_body(const uint8_t *body, int body_len, struct parsed_p
     }
 }
 
-// Detect EAPOL frames
+// Detect EAPOL frames - scan body for LLC/SNAP + EAPOL ethertype
 static void detect_eapol(const uint8_t *frame, int length, struct parsed_packet *pkt) {
-    if (length >= 8) {
-        if (frame[0] == 0xAA && frame[1] == 0xAA && frame[2] == 0x03 &&
-            frame[3] == 0x00 && frame[4] == 0x00 && frame[5] == 0x00) {
-            uint16_t ethertype = ntohs(*(uint16_t *)(frame + 6));
+    // Scan for AA AA 03 00 00 00 88 8E (LLC/SNAP with EAPOL ethertype)
+    // Must handle: plain data (offset 0), QoS data (offset 2 due to QoS Control field)
+    if (length < 8) return;
+
+    for (int i = 0; i <= length - 8; i++) {
+        if (frame[i] == 0xAA && frame[i+1] == 0xAA && frame[i+2] == 0x03 &&
+            frame[i+3] == 0x00 && frame[i+4] == 0x00 && frame[i+5] == 0x00) {
+            uint16_t ethertype = ntohs(*(uint16_t *)(frame + i + 6));
             if (ethertype == ETHERTYPE_EAPOL) {
                 pkt->is_eapol = 1;
                 pkt->eapol_type = 1;
+                return;
             }
         }
     }

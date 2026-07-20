@@ -15,6 +15,10 @@
 static int default_channels[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
 static int num_default_channels = 14;
 
+static int debug_data_frames = 0;
+static int debug_eapol_detects = 0;
+static int debug_eapol_processed = 0;
+
 void scanner_init(struct scanner_state *state, struct capture_handle *cap,
                   struct wpa_handshake *handshake, volatile int *running) {
     memset(state, 0, sizeof(*state));
@@ -35,6 +39,21 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
     struct parsed_packet pkt = parse_packet(packet, length);
     if (!pkt.valid) {
         return;
+    }
+
+    if (pkt.frame_type == WIFI_FRAME_TYPE_DATA) {
+        debug_data_frames++;
+    }
+
+    if (pkt.is_eapol) {
+        debug_eapol_detects++;
+        char src_str[18], dst_str[18], bssid_str[18];
+        mac_to_str(pkt.src_mac, src_str);
+        mac_to_str(pkt.dst_mac, dst_str);
+        mac_to_str(pkt.bssid, bssid_str);
+        log_info("[EAPOL DETECT] frame_type=%d subtype=%d body_offset=%d remaining=%d src=%s dst=%s bssid=%s",
+                 pkt.frame_type, pkt.frame_subtype, pkt.body_offset,
+                 length - pkt.body_offset, src_str, dst_str, bssid_str);
     }
 
     if (pkt.is_eapol) {
@@ -58,13 +77,17 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
         }
 
         if (!eapol_start) {
+            log_info("[EAPOL] LLC/SNAP not found in frame body");
             return;
         }
 
         int eapol_len = length - (eapol_start - packet);
         if (eapol_len < 0 || eapol_len > 400) {
+            log_info("[EAPOL] Invalid eapol_len=%d", eapol_len);
             return;
         }
+
+        debug_eapol_processed++;
 
         int msg_type = handshake_process_eapol(state->handshake,
                                                pkt.src_mac,
@@ -167,6 +190,11 @@ void scanner_print_aps(struct scanner_state *state) {
 void scanner_get_channels(int *channels, int *num_channels) {
     memcpy(channels, default_channels, sizeof(default_channels));
     *num_channels = num_default_channels;
+}
+
+void scanner_print_debug_stats(void) {
+    log_info("[DEBUG] Data frames seen: %d | EAPOL detected: %d | EAPOL processed: %d",
+             debug_data_frames, debug_eapol_detects, debug_eapol_processed);
 }
 
 int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int duration_sec) {
