@@ -4,85 +4,53 @@
 #include <string.h>
 #include <arpa/inet.h>
 
-// EAPOL Key descriptor type
-#define EAPOL_KEY_DESCRIPTOR_TYPE_WPA  2
-#define EAPOL_KEY_DESCRIPTOR_TYPE_RSN  2
-
-// EAPOL Key Info flags
-#define WPA_KEY_INFO_TYPE_MASK    0x0007
-#define WPA_KEY_INFO_TYPE_HMAC    0x0001
-#define WPA_KEY_INFO_TYPE_CCMP    0x0002
-#define WPA_KEY_INFO_TYPE_TKIP    0x0003
-
-#define WPA_KEY_INFO_KEY_TYPE     0x0008  // 1 = Pairwise, 0 = Group
-#define WPA_KEY_INFO_MIC          0x0100  // MIC present
-#define WPA_KEY_INFO_SECURE       0x0200
-#define WPA_KEY_INFO_REQUEST      0x0800
-#define WPA_KEY_INFO_ACK          0x0080  // ACK bit
-#define WPA_KEY_INFO_INSTALL      0x0040  // Install bit
-
-// EAPOL structure (simplified)
-struct eapol_header {
-    uint8_t  version;
-    uint8_t  type;          // 3 = Key
-    uint16_t length;
-} __attribute__((packed));
-
-// EAPOL Key structure (WPA/RSN)
-struct eapol_key {
-    uint8_t  descriptor_type;    // 254 for WPA, 2 for RSN
-    uint16_t info;               // Key info
-    uint16_t key_length;
-    uint64_t replay_counter;
-    uint8_t  nonce[32];          // ANonce or SNonce
-    uint8_t  iv[16];
-    uint8_t  key_rsc[8];
-    uint8_t  key_id[8];
-    uint8_t  mic[16];           // Message Integrity Check
-    uint16_t key_data_length;
-    // Followed by key data (encrypted)
-} __attribute__((packed));
-
 void handshake_init(struct wpa_handshake *hs) {
     memset(hs, 0, sizeof(*hs));
 }
 
-// Determine message type based on key info flags
-static int determine_message_type(const struct eapol_key *key) {
-    uint16_t info = ntohs(key->info);
-    int has_ack = (info & WPA_KEY_INFO_ACK) != 0;
-    int has_mic = (info & WPA_KEY_INFO_MIC) != 0;
-    int has_install = (info & WPA_KEY_INFO_INSTALL) != 0;
-    int is_pairwise = (info & WPA_KEY_INFO_KEY_TYPE) != 0;
-
-    // Message 1: AP → Client (ACK=1, MIC=0, Install=0)
-    if (has_ack && !has_mic && !has_install && is_pairwise) {
-        return WPA_MSG_TYPE_1;
+static int determine_message_type(const uint8_t *eapol_data, int eapol_len) {
+    // EAPOL header: version(1) + type(1) + length(2) = 4 bytes
+    // Key descriptor: type(1) + info(2) + key_length(2) + replay(8) + nonce(32) + iv(16) + rsc(8) + id(8) + mic(16) + data_len(2)
+    // Total EAPOL Key header before key data: 95 bytes from start of EAPOL
+    if (eapol_len < 99) {  // 4 (EAPOL header) + 95 (key header minimum)
+        return -1;
     }
 
-    // Message 2: Client → AP (ACK=0, MIC=1, Install=0)
-    if (!has_ack && has_mic && !has_install && is_pairwise) {
-        return WPA_MSG_TYPE_2;
+    // EAPOL type 3 = Key
+    if (eapol_data[1] != 3) {
+        return -1;
     }
 
-    // Message 3: AP → Client (ACK=1, MIC=1, Install=1)
+    // Key info is at offset 5 (EAPOL header 4 bytes + descriptor type 1 byte)
+    uint16_t key_info = (eapol_data[5] << 8) | eapol_data[6];
+
+    int has_ack    = (key_info & 0x0080) != 0;
+    int has_mic    = (key_info & 0x0100) != 0;
+    int has_install= (key_info & 0x0040) != 0;
+    int is_pairwise= (key_info & 0x0008) != 0;
+
+    // Message 1: AP -> Client (ACK=1, MIC=0, Install=0, Pairwise=1)
+    if (has_ack && !has_mic && is_pairwise) {
+        return 1;
+    }
+
+    // Message 2: Client -> AP (ACK=0, MIC=1, Install=0, Pairwise=1, key_data_len > 0)
+    if (!has_ack && has_mic && is_pairwise) {
+        uint16_t key_data_len = (eapol_data[97] << 8) | eapol_data[98];
+        if (key_data_len > 0) {
+            return 2;
+        } else {
+            // Message 4: no key data
+            return 4;
+        }
+    }
+
+    // Message 3: AP -> Client (ACK=1, MIC=1, Install=1, Pairwise=1)
     if (has_ack && has_mic && has_install && is_pairwise) {
-        return WPA_MSG_TYPE_3;
+        return 3;
     }
 
-    // Message 4: Client → AP (ACK=0, MIC=1, Install=0)
-    // Same as message 2, but we track separately
-    if (!has_ack && has_mic && !has_install && is_pairwise) {
-        return WPA_MSG_TYPE_4;
-    }
-
-    return -1; // Unknown
-}
-
-// Determine direction (AP to Client or Client to AP)
-static int is_ap_to_client(const uint8_t *src_mac,
-                           const uint8_t *ap_mac) {
-    return memcmp(src_mac, ap_mac, 6) == 0;
+    return -1;
 }
 
 int handshake_process_eapol(struct wpa_handshake *hs,
@@ -90,94 +58,83 @@ int handshake_process_eapol(struct wpa_handshake *hs,
                             const uint8_t *dst_mac,
                             const uint8_t *eapol_data,
                             int eapol_len) {
-    if ((size_t)eapol_len < sizeof(struct eapol_header) + sizeof(struct eapol_key)) {
+    if (eapol_len < 99) {
         return -1;
     }
 
-    const struct eapol_header *eapol = (const struct eapol_header *)eapol_data;
-
-    // Check if this is a Key frame (type 3)
-    if (eapol->type != 3) {
-        return -1;
-    }
-
-    const struct eapol_key *key = (const struct eapol_key *)(eapol_data + sizeof(struct eapol_header));
-
-    // Determine message type
-    int msg_type = determine_message_type(key);
+    int msg_type = determine_message_type(eapol_data, eapol_len);
     if (msg_type < 0) {
         return -1;
     }
 
-    // Determine AP MAC (from first message or from existing handshake)
-    uint8_t ap_mac[6];
-    if (hs->msg1_received) {
-        memcpy(ap_mac, hs->ap_mac, 6);
-    } else if (msg_type == WPA_MSG_TYPE_1) {
-        // First message: source is AP
-        memcpy(ap_mac, src_mac, 6);
+    // Determine AP MAC from first message or existing handshake
+    if (msg_type == 1 && !hs->msg1_received) {
+        // Message 1: source is AP
         memcpy(hs->ap_mac, src_mac, 6);
         memcpy(hs->client_mac, dst_mac, 6);
-    } else {
-        // Not first message and no AP MAC known
-        return -1;
     }
 
-    // Process based on message type
+    // Extract ANonce (offset 13 from EAPOL start: header 4 + desc_type 1 + info 2 + key_len 2 + replay 8 = 17, nonce at 17, 32 bytes)
+    // Wait, let me recalculate:
+    // EAPOL header: 4 bytes
+    // Key descriptor type: 1 byte (offset 4)
+    // Key info: 2 bytes (offset 5)
+    // Key length: 2 bytes (offset 7)
+    // Replay counter: 8 bytes (offset 9)
+    // Nonce: 32 bytes (offset 17)
+    // So nonce is at offset 17
+
     switch (msg_type) {
-        case WPA_MSG_TYPE_1:
-            // AP → Client: Extract ANonce
-            if (!is_ap_to_client(src_mac, ap_mac)) {
-                return -1; // Not from AP
-            }
-            memcpy(hs->anonce, key->nonce, 32);
+        case 1:
+            memcpy(hs->anonce, eapol_data + 17, 32);
             hs->msg1_received = 1;
-            log_info("Received Message 1 (ANonce)");
+            log_info("  [+] Message 1 captured (ANonce)");
             break;
 
-        case WPA_MSG_TYPE_2:
-            // Client → AP: Extract SNonce and MIC
-            if (is_ap_to_client(src_mac, ap_mac)) {
-                return -1; // Should be from client
-            }
-            memcpy(hs->snonce, key->nonce, 32);
-            memcpy(hs->mic, key->mic, 16);
-            // Store EAPOL frame for verification
+        case 2:
+            memcpy(hs->snonce, eapol_data + 17, 32);
+            memcpy(hs->mic, eapol_data + 81, 16);  // MIC at offset 4+1+2+2+8+32+16+8+8 = 81
+
+            // Store full EAPOL for verification
             if (eapol_len <= MAX_EAPOL_SIZE) {
                 memcpy(hs->eapol_frame, eapol_data, eapol_len);
                 hs->eapol_len = eapol_len;
             }
             hs->msg2_received = 1;
-            log_info("Received Message 2 (SNonce + MIC)");
+            log_info("  [+] Message 2 captured (SNonce + MIC)");
             break;
 
-        case WPA_MSG_TYPE_3:
-            // AP → Client: Verify with ANonce
-            if (!is_ap_to_client(src_mac, ap_mac)) {
-                return -1; // Not from AP
-            }
+        case 3:
             hs->msg3_received = 1;
-            log_info("Received Message 3");
+            log_info("  [+] Message 3 captured");
             break;
 
-        case WPA_MSG_TYPE_4:
-            // Client → AP: Final ACK
-            if (is_ap_to_client(src_mac, ap_mac)) {
-                return -1; // Should be from client
-            }
+        case 4:
             hs->msg4_received = 1;
-            log_info("Received Message 4 (ACK)");
+            log_info("  [+] Message 4 captured (ACK)");
             break;
     }
 
-    // Check if handshake is now complete
+    // Check if we have enough to crack (message 1 + message 2)
+    if (hs->msg1_received && hs->msg2_received) {
+        if (!hs->usable) {
+            hs->usable = 1;
+            log_success("Handshake USABLE for cracking! (got msg 1 + msg 2)");
+        }
+    }
+
+    // Check if fully complete
     if (hs->msg1_received && hs->msg2_received &&
         hs->msg3_received && hs->msg4_received) {
         hs->complete = 1;
-        log_success("Handshake COMPLETE!");
+        log_success("Handshake COMPLETE (all 4 messages)");
     }
 
     return msg_type;
+}
+
+int handshake_is_usable(struct wpa_handshake *hs) {
+    return hs->usable;
 }
 
 int handshake_is_complete(struct wpa_handshake *hs) {
@@ -185,23 +142,32 @@ int handshake_is_complete(struct wpa_handshake *hs) {
 }
 
 void handshake_print_status(struct wpa_handshake *hs) {
-    char ap_str[18], client_str[18];
-    mac_to_str(hs->ap_mac, ap_str);
-    mac_to_str(hs->client_mac, client_str);
+    char ap_str[18] = {0}, client_str[18] = {0};
+
+    if (hs->msg1_received || hs->msg2_received || hs->msg3_received || hs->msg4_received) {
+        mac_to_str(hs->ap_mac, ap_str);
+        mac_to_str(hs->client_mac, client_str);
+    }
 
     printf("\n=== Handshake Status ===\n");
-    printf("AP MAC:     %s\n", hs->msg1_received ? ap_str : "(not yet)");
-    printf("Client MAC: %s\n", hs->msg2_received ? client_str : "(not yet)");
+    printf("AP MAC:     %s\n", (hs->msg1_received || hs->msg3_received) ? ap_str : "(not yet)");
+    printf("Client MAC: %s\n", (hs->msg2_received || hs->msg4_received) ? client_str : "(not yet)");
     printf("SSID:       %s\n", strlen(hs->ssid) > 0 ? hs->ssid : "(not captured)");
     printf("Channel:    %d\n", hs->channel > 0 ? hs->channel : 0);
 
     printf("\nMessages:\n");
-    printf("  Message 1: %s\n", hs->msg1_received ? "[RECEIVED]" : "[waiting]");
-    printf("  Message 2: %s\n", hs->msg2_received ? "[RECEIVED]" : "[waiting]");
-    printf("  Message 3: %s\n", hs->msg3_received ? "[RECEIVED]" : "[waiting]");
-    printf("  Message 4: %s\n", hs->msg4_received ? "[RECEIVED]" : "[waiting]");
+    printf("  Message 1: %s\n", hs->msg1_received ? "[CAPTURED]" : "[waiting]");
+    printf("  Message 2: %s\n", hs->msg2_received ? "[CAPTURED]" : "[waiting]");
+    printf("  Message 3: %s\n", hs->msg3_received ? "[CAPTURED]" : "[waiting]");
+    printf("  Message 4: %s\n", hs->msg4_received ? "[CAPTURED]  " : "[waiting]");
 
-    printf("\nStatus: %s\n", hs->complete ? "COMPLETE" : "INCOMPLETE");
+    if (hs->complete) {
+        printf("\nStatus: COMPLETE\n");
+    } else if (hs->usable) {
+        printf("\nStatus: USABLE FOR CRACKING\n");
+    } else {
+        printf("\nStatus: INCOMPLETE\n");
+    }
     printf("========================\n\n");
 }
 
@@ -212,7 +178,6 @@ int handshake_save(struct wpa_handshake *hs, const char *filename) {
         return -1;
     }
 
-    // Write header
     fprintf(fp, "WPA Handshake File\n");
     fprintf(fp, "AP MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
             hs->ap_mac[0], hs->ap_mac[1], hs->ap_mac[2],
@@ -222,9 +187,9 @@ int handshake_save(struct wpa_handshake *hs, const char *filename) {
             hs->client_mac[3], hs->client_mac[4], hs->client_mac[5]);
     fprintf(fp, "SSID: %s\n", hs->ssid);
     fprintf(fp, "Channel: %d\n", hs->channel);
+    fprintf(fp, "Usable: %d\n", hs->usable);
     fprintf(fp, "Complete: %d\n", hs->complete);
 
-    // Write EAPOL frame in hex
     fprintf(fp, "\nEAPOL Frame (hex):\n");
     for (int i = 0; i < hs->eapol_len; i++) {
         fprintf(fp, "%02X", hs->eapol_frame[i]);
@@ -260,5 +225,5 @@ void handshake_get_info(struct wpa_handshake *hs, char *buffer, int bufsize) {
              strlen(hs->ssid) > 0 ? hs->ssid : "?",
              hs->msg1_received, hs->msg2_received,
              hs->msg3_received, hs->msg4_received,
-             hs->complete ? "COMPLETE" : "waiting");
+             hs->usable ? "USABLE" : "waiting");
 }

@@ -316,6 +316,8 @@ struct parsed_packet parse_packet(const uint8_t *packet, int length) {
     const uint8_t *frame = packet + rt_len;
     int frame_len = length - rt_len;
 
+    pkt.frame_offset = rt_len;
+
     int mac_len = parse_mac_header(frame, frame_len, &pkt);
     if (mac_len < 0) {
         return pkt;
@@ -323,6 +325,8 @@ struct parsed_packet parse_packet(const uint8_t *packet, int length) {
 
     const uint8_t *body = frame + mac_len;
     int body_len = frame_len - mac_len;
+
+    pkt.body_offset = rt_len + mac_len;
 
     if (pkt.frame_type == WIFI_FRAME_TYPE_MANAGEMENT) {
         if (pkt.frame_subtype == WIFI_SUBTYPE_BEACON ||

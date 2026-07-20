@@ -428,10 +428,10 @@ int main(int argc, char *argv[]) {
                     int len = capture_packet(&cap, buf, sizeof(buf), 500);
                     if (len > 0) {
                         scanner_packet_callback(buf, len, &scanner);
-                        if (handshake_is_complete(&handshake)) break;
+                        if (handshake_is_usable(&handshake)) break;
                     }
                 }
-                if (handshake_is_complete(&handshake)) break;
+                if (handshake_is_usable(&handshake)) break;
             }
         }
     }
@@ -442,7 +442,7 @@ int main(int argc, char *argv[]) {
     int handshake_timeout = 60; // 60 seconds to capture handshake
     uint8_t buffer[MAX_PACKET_SIZE];
 
-    while (running && !handshake_is_complete(&handshake)) {
+    while (running && !handshake_is_usable(&handshake)) {
         if ((time(NULL) - capture_start) > handshake_timeout) {
             log_warning("Handshake capture timed out after %d seconds", handshake_timeout);
             break;
@@ -462,7 +462,7 @@ int main(int argc, char *argv[]) {
     printf("\n");
 
     // Check results
-    if (handshake_is_complete(&handshake)) {
+    if (handshake_is_usable(&handshake)) {
         log_success("WPA handshake captured!");
 
         // Save handshake

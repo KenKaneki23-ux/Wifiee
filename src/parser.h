@@ -108,6 +108,8 @@ struct parsed_packet {
     // Raw data
     const uint8_t *raw_data;        // Pointer to original packet
     int raw_len;                    // Original packet length
+    int frame_offset;               // Offset from raw_data to 802.11 MAC header
+    int body_offset;                // Offset from raw_data to 802.11 frame body (after MAC header)
 };
 
 // Initialize parser

