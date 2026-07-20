@@ -346,78 +346,133 @@ int main(int argc, char *argv[]) {
         scanner.has_target = 1;
     }
 
-    // Main scanning/capture loop
-    log_info("Starting capture... (Press Ctrl+C to stop)");
+    // Phase 1: Scan for networks
+    log_info("Phase 1: Scanning for WiFi networks...");
     printf("\n");
 
-    int dwell_time = 250; // 250ms per channel
-    int ap_count = scanner_start(&scanner, dwell_time);
+    int dwell_time = 250;
+    int scan_duration = 10; // 10 seconds scan
+    int ap_count = scanner_scan_duration(&scanner, dwell_time, scan_duration);
 
     printf("\n");
 
-    // Check results
     if (ap_count == 0) {
         log_warning("No access points found");
         log_info("Tips:");
         log_info("  - Make sure your adapter supports monitor mode");
         log_info("  - Try moving closer to access points");
         log_info("  - Check if the interface is working properly");
+        goto cleanup;
+    }
+
+    log_info("Found %d access points", ap_count);
+
+    // Phase 2: Let user select target (if not already specified)
+    if (!scanner.has_target) {
+        printf("\n");
+        log_info("Phase 2: Select target network");
+
+        int target_idx = scanner_select_target(&scanner);
+        if (target_idx < 0) {
+            log_warning("No target selected");
+            goto cleanup;
+        }
+
+        // Set channel to target network's channel
+        int target_channel = scanner.aps[target_idx].channel;
+        log_info("Switching to channel %d for target...", target_channel);
+        if (capture_set_channel(&cap, target_channel) < 0) {
+            log_error("Failed to set channel %d", target_channel);
+            goto cleanup;
+        }
     } else {
-        log_info("Found %d access points", ap_count);
-
-        // Check if we captured a complete handshake
-        if (handshake_is_complete(&handshake)) {
-            log_success("WPA handshake captured!");
-
-            // Save handshake
-            char handshake_file[256];
-            snprintf(handshake_file, sizeof(handshake_file), "handshake_%s.cap",
-                     global_iface_name);
-
-            if (handshake_save(&handshake, handshake_file) == 0) {
-                log_info("Handshake saved to: %s", handshake_file);
-            }
-
-            // Print handshake info
-            handshake_print_status(&handshake);
-
-            // Start dictionary attack
-            if (!opts.scan_only && strlen(opts.wordlist) > 0) {
-                printf("\n");
-                log_info("Starting dictionary attack...");
-
-                struct cracker_config cracker_cfg;
-                struct cracker_stats cracker_stats;
-
-                cracker_config_init(&cracker_cfg);
-                cracker_config_set_wordlist(&cracker_cfg, opts.wordlist);
-                if (strlen(handshake.ssid) > 0) {
-                    cracker_config_set_ssid(&cracker_cfg, handshake.ssid);
-                }
-
-                int crack_result = cracker_attack(&handshake, &cracker_cfg, &cracker_stats);
-                cracker_print_stats(&cracker_stats);
-
-                if (crack_result == 0) {
-                    log_success("Password cracked successfully!");
-                    result = EXIT_SUCCESS;
-                } else if (crack_result == 1) {
-                    log_warning("Password not found in wordlist");
-                    log_info("Try a larger wordlist or check if the password is complex");
-                    result = EXIT_SUCCESS;  // Handshake was captured, just not cracked
-                } else {
-                    log_error("Dictionary attack failed");
-                }
-            }
-        } else {
-            log_warning("Handshake capture incomplete");
-            handshake_print_status(&handshake);
-            log_info("Tips:");
-            log_info("  - Wait for devices to connect/reconnect to the network");
-            log_info("  - Deauthentication attacks may force reconnection (advanced)");
+        // BSSID was specified, find its channel
+        struct ap_info *target = scanner_find_ap(&scanner, target_bssid);
+        if (target && target->channel > 0) {
+            log_info("Target found on channel %d", target->channel);
+            capture_set_channel(&cap, target->channel);
         }
     }
 
+    // Phase 3: Capture handshake on target
+    printf("\n");
+    log_info("Phase 3: Capturing handshake on target... (Press Ctrl+C to stop)");
+
+    time_t capture_start = time(NULL);
+    int handshake_timeout = 60; // 60 seconds to capture handshake
+    uint8_t buffer[MAX_PACKET_SIZE];
+
+    while (running && !handshake_is_complete(&handshake)) {
+        if ((time(NULL) - capture_start) > handshake_timeout) {
+            log_warning("Handshake capture timed out after %d seconds", handshake_timeout);
+            break;
+        }
+
+        int packet_len = capture_packet(&cap, buffer, sizeof(buffer), 500);
+        if (packet_len > 0) {
+            scanner_packet_callback(buffer, packet_len, &scanner);
+        }
+
+        // Print status every 10 seconds
+        if ((time(NULL) - capture_start) % 10 == 0) {
+            handshake_print_status(&handshake);
+        }
+    }
+
+    printf("\n");
+
+    // Check results
+    if (handshake_is_complete(&handshake)) {
+        log_success("WPA handshake captured!");
+
+        // Save handshake
+        char handshake_file[256];
+        snprintf(handshake_file, sizeof(handshake_file), "handshake_%s.cap",
+                 global_iface_name);
+
+        if (handshake_save(&handshake, handshake_file) == 0) {
+            log_info("Handshake saved to: %s", handshake_file);
+        }
+
+        handshake_print_status(&handshake);
+
+        // Phase 4: Dictionary attack
+        if (!opts.scan_only && strlen(opts.wordlist) > 0) {
+            printf("\n");
+            log_info("Phase 4: Starting dictionary attack...");
+
+            struct cracker_config cracker_cfg;
+            struct cracker_stats cracker_stats;
+
+            cracker_config_init(&cracker_cfg);
+            cracker_config_set_wordlist(&cracker_cfg, opts.wordlist);
+            if (strlen(handshake.ssid) > 0) {
+                cracker_config_set_ssid(&cracker_cfg, handshake.ssid);
+            }
+
+            int crack_result = cracker_attack(&handshake, &cracker_cfg, &cracker_stats);
+            cracker_print_stats(&cracker_stats);
+
+            if (crack_result == 0) {
+                log_success("Password cracked successfully!");
+                result = EXIT_SUCCESS;
+            } else if (crack_result == 1) {
+                log_warning("Password not found in wordlist");
+                log_info("Try a larger wordlist or check if the password is complex");
+                result = EXIT_SUCCESS;
+            } else {
+                log_error("Dictionary attack failed");
+            }
+        }
+    } else {
+        log_warning("Handshake capture incomplete");
+        handshake_print_status(&handshake);
+        log_info("Tips:");
+        log_info("  - Wait for devices to connect/reconnect to the network");
+        log_info("  - Try running the tool again");
+    }
+
+cleanup:
     // Cleanup handled by atexit(cleanup)
     log_info("Done.");
     return (result == EXIT_SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE;

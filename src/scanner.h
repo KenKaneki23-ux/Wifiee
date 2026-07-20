@@ -49,6 +49,13 @@ void scanner_print_aps(struct scanner_state *state);
 // Start scanning (channel hop + capture)
 int scanner_start(struct scanner_state *state, int dwell_time_ms);
 
+// Start scanning for a fixed duration (seconds), returns AP count
+int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int duration_sec);
+
+// Interactive network selection - prompts user to choose
+// Returns index of selected AP, or -1 if cancelled
+int scanner_select_target(struct scanner_state *state);
+
 // Get channel list (1-14)
 void scanner_get_channels(int *channels, int *num_channels);
 

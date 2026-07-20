@@ -199,3 +199,106 @@ int scanner_start(struct scanner_state *state, int dwell_time_ms) {
 
     return state->ap_count;
 }
+
+// Scan for a fixed duration
+int scanner_scan_duration(struct scanner_state *state, int dwell_time_ms, int duration_sec) {
+    int channels[14];
+    int num_channels;
+
+    scanner_get_channels(channels, &num_channels);
+
+    log_info("Scanning for %d seconds...", duration_sec);
+
+    uint8_t buffer[MAX_PACKET_SIZE];
+    int current_channel = 0;
+    time_t start_time = time(NULL);
+    time_t last_print = time(NULL);
+
+    while (*(state->running) && (time(NULL) - start_time) < duration_sec) {
+        if (capture_set_channel(state->cap, channels[current_channel]) < 0) {
+            current_channel = (current_channel + 1) % num_channels;
+            continue;
+        }
+
+        struct timeval tv_start, tv_now;
+        gettimeofday(&tv_start, NULL);
+
+        do {
+            int packet_len = capture_packet(state->cap, buffer, sizeof(buffer), 100);
+            if (packet_len > 0) {
+                scanner_packet_callback(buffer, packet_len, state);
+            }
+            gettimeofday(&tv_now, NULL);
+        } while (((tv_now.tv_sec - tv_start.tv_sec) * 1000 +
+                  (tv_now.tv_usec - tv_start.tv_usec) / 1000) < dwell_time_ms);
+
+        current_channel = (current_channel + 1) % num_channels;
+
+        if (time(NULL) - last_print >= 3) {
+            scanner_print_aps(state);
+            last_print = time(NULL);
+        }
+    }
+
+    scanner_print_aps(state);
+    return state->ap_count;
+}
+
+// Interactive target selection
+int scanner_select_target(struct scanner_state *state) {
+    if (state->ap_count == 0) {
+        log_warning("No networks found. Try scanning again.");
+        return -1;
+    }
+
+    printf("\n");
+    printf("╔════════════════════════════════════════════════════════════════╗\n");
+    printf("║                   SELECT TARGET NETWORK                      ║\n");
+    printf("╠════════════════════════════════════════════════════════════════╣\n");
+    printf("║  #   BSSID              Signal  Ch  SSID                     ║\n");
+    printf("╠════════════════════════════════════════════════════════════════╣\n");
+
+    for (int i = 0; i < state->ap_count; i++) {
+        char bssid_str[18];
+        mac_to_str(state->aps[i].bssid, bssid_str);
+
+        printf("║  [%d] %-17s  %4d dBm  %2d  %-28s ║\n",
+               i + 1,
+               bssid_str,
+               state->aps[i].signal_dbm,
+               state->aps[i].channel,
+               strlen(state->aps[i].ssid) > 0 ? state->aps[i].ssid : "(hidden)");
+    }
+
+    printf("╚════════════════════════════════════════════════════════════════╝\n\n");
+
+    int choice = -1;
+    while (choice < 1 || choice > state->ap_count) {
+        printf("  Enter target number (1-%d): ", state->ap_count);
+        fflush(stdout);
+
+        if (scanf("%d", &choice) != 1) {
+            while (getchar() != '\n');
+            choice = -1;
+        }
+
+        if (choice < 1 || choice > state->ap_count) {
+            log_warning("Invalid choice. Enter a number between 1 and %d", state->ap_count);
+        }
+    }
+
+    int idx = choice - 1;
+
+    // Set target
+    memcpy(state->target_bssid, state->aps[idx].bssid, 6);
+    state->has_target = 1;
+
+    char bssid_str[18];
+    mac_to_str(state->aps[idx].bssid, bssid_str);
+    log_success("Target selected: %s (%s) on channel %d",
+                strlen(state->aps[idx].ssid) > 0 ? state->aps[idx].ssid : bssid_str,
+                bssid_str,
+                state->aps[idx].channel);
+
+    return idx;
+}
