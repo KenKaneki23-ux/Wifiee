@@ -162,7 +162,7 @@ int crypto_calculate_mic(const uint8_t *ptk,
 
     // Create a copy of the EAPOL frame with MIC field zeroed
     uint8_t frame_copy[256];
-    if (eapol_len > sizeof(frame_copy)) {
+    if ((size_t)eapol_len > sizeof(frame_copy)) {
         return -1;
     }
     memcpy(frame_copy, eapol_frame, eapol_len);

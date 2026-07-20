@@ -1,7 +1,7 @@
 #ifndef MONITOR_H
 #define MONITOR_H
 
-#include <linux/if.h>
+#include <net/if.h>
 
 // Put interface into monitor mode
 // Returns 0 on success, -1 on failure

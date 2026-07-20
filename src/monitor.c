@@ -1,11 +1,11 @@
 #include "monitor.h"
 #include "utils.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <net/if.h>
 #include <linux/wireless.h>
 
 // Execute shell command and return status
@@ -34,8 +34,6 @@ static int set_interface_up(const char *iface_name) {
 // Set monitor mode using iw
 static int set_monitor_mode_iw(const char *iface_name) {
     char cmd[128];
-
-    // Use iw to set monitor mode
     snprintf(cmd, sizeof(cmd), "iw %s set monitor control 2>/dev/null", iface_name);
     return exec_cmd(cmd);
 }
@@ -53,9 +51,7 @@ static void kill_interfering_processes(void) {
     exec_cmd("killall wpa_supplicant 2>/dev/null");
     exec_cmd("killall dhclient 2>/dev/null");
     exec_cmd("killall hostapd 2>/dev/null");
-    // Note: Don't kill NetworkManager unless necessary
-    // exec_cmd("killall NetworkManager 2>/dev/null");
-    usleep(500000); // Wait 500ms
+    usleep(500000);
 }
 
 int enable_monitor_mode(const char *iface_name) {
@@ -74,13 +70,12 @@ int enable_monitor_mode(const char *iface_name) {
     // Bring interface down
     log_info("Bringing interface down...");
     if (set_interface_down(iface_name) != 0) {
-        // Try force down with ifconfig
         char cmd[128];
         snprintf(cmd, sizeof(cmd), "ifconfig %s down 2>/dev/null", iface_name);
         exec_cmd(cmd);
     }
 
-    usleep(200000); // Wait 200ms
+    usleep(200000);
 
     // Set monitor mode with iw (preferred)
     log_info("Setting monitor mode...");
@@ -95,13 +90,12 @@ int enable_monitor_mode(const char *iface_name) {
     // Bring interface back up
     log_info("Bringing interface up...");
     if (set_interface_up(iface_name) != 0) {
-        // Try with ifconfig
         char cmd[128];
         snprintf(cmd, sizeof(cmd), "ifconfig %s up 2>/dev/null", iface_name);
         exec_cmd(cmd);
     }
 
-    usleep(200000); // Wait 200ms
+    usleep(200000);
 
     // Verify mode
     const char *new_mode = get_interface_mode(iface_name);
@@ -117,20 +111,16 @@ int enable_monitor_mode(const char *iface_name) {
 int disable_monitor_mode(const char *iface_name) {
     log_info("Restoring %s to managed mode...", iface_name);
 
-    // Bring interface down
     set_interface_down(iface_name);
     usleep(200000);
 
-    // Set managed mode with iw
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "iw %s set type managed 2>/dev/null", iface_name);
     if (exec_cmd(cmd) != 0) {
-        // Try iwconfig
         snprintf(cmd, sizeof(cmd), "iwconfig %s mode managed 2>/dev/null", iface_name);
         exec_cmd(cmd);
     }
 
-    // Bring interface up
     set_interface_up(iface_name);
     usleep(200000);
 
@@ -143,7 +133,6 @@ const char* get_interface_mode(const char *iface_name) {
     char cmd[128];
     FILE *fp;
 
-    // Try iw first
     snprintf(cmd, sizeof(cmd), "iw %s info 2>/dev/null | grep type | awk '{print $2}'", iface_name);
     fp = popen(cmd, "r");
     if (fp) {
@@ -157,7 +146,6 @@ const char* get_interface_mode(const char *iface_name) {
         pclose(fp);
     }
 
-    // Fallback to "unknown"
     strncpy(mode, "unknown", sizeof(mode) - 1);
     return mode;
 }

@@ -36,28 +36,6 @@ static void strip_whitespace(char *str) {
     }
 }
 
-// Print progress bar
-static void print_progress(int current, int total) {
-    if (total <= 0) return;
-
-    int percent = (current * 100) / total;
-    int bar_width = 30;
-    int filled = (percent * bar_width) / 100;
-
-    printf("\r[");
-    for (int i = 0; i < bar_width; i++) {
-        if (i < filled) {
-            printf("=");
-        } else if (i == filled) {
-            printf(">");
-        } else {
-            printf(" ");
-        }
-    }
-    printf("] %d%% (%d/%d)", percent, current, total);
-    fflush(stdout);
-}
-
 int cracker_attack(struct wpa_handshake *handshake,
                    struct cracker_config *config,
                    struct cracker_stats *stats) {
@@ -65,7 +43,6 @@ int cracker_attack(struct wpa_handshake *handshake,
     char line[256];
     uint8_t pmk[WPA_PMK_LEN];
     uint8_t ptk[WPA_PTK_LEN];
-    uint8_t calculated_mic[WPA_MIC_LEN];
     int password_num = 0;
     double start_time, current_time;
 

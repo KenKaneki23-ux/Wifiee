@@ -80,7 +80,7 @@ static int determine_message_type(const struct eapol_key *key) {
 }
 
 // Determine direction (AP to Client or Client to AP)
-static int is_ap_to_client(const uint8_t *src_mac, const uint8_t *dst_mac,
+static int is_ap_to_client(const uint8_t *src_mac,
                            const uint8_t *ap_mac) {
     return memcmp(src_mac, ap_mac, 6) == 0;
 }
@@ -90,7 +90,7 @@ int handshake_process_eapol(struct wpa_handshake *hs,
                             const uint8_t *dst_mac,
                             const uint8_t *eapol_data,
                             int eapol_len) {
-    if (eapol_len < sizeof(struct eapol_header) + sizeof(struct eapol_key)) {
+    if ((size_t)eapol_len < sizeof(struct eapol_header) + sizeof(struct eapol_key)) {
         return -1;
     }
 
@@ -127,7 +127,7 @@ int handshake_process_eapol(struct wpa_handshake *hs,
     switch (msg_type) {
         case WPA_MSG_TYPE_1:
             // AP → Client: Extract ANonce
-            if (!is_ap_to_client(src_mac, dst_mac, ap_mac)) {
+            if (!is_ap_to_client(src_mac, ap_mac)) {
                 return -1; // Not from AP
             }
             memcpy(hs->anonce, key->nonce, 32);
@@ -137,7 +137,7 @@ int handshake_process_eapol(struct wpa_handshake *hs,
 
         case WPA_MSG_TYPE_2:
             // Client → AP: Extract SNonce and MIC
-            if (is_ap_to_client(src_mac, dst_mac, ap_mac)) {
+            if (is_ap_to_client(src_mac, ap_mac)) {
                 return -1; // Should be from client
             }
             memcpy(hs->snonce, key->nonce, 32);
@@ -153,7 +153,7 @@ int handshake_process_eapol(struct wpa_handshake *hs,
 
         case WPA_MSG_TYPE_3:
             // AP → Client: Verify with ANonce
-            if (!is_ap_to_client(src_mac, dst_mac, ap_mac)) {
+            if (!is_ap_to_client(src_mac, ap_mac)) {
                 return -1; // Not from AP
             }
             hs->msg3_received = 1;
@@ -162,7 +162,7 @@ int handshake_process_eapol(struct wpa_handshake *hs,
 
         case WPA_MSG_TYPE_4:
             // Client → AP: Final ACK
-            if (is_ap_to_client(src_mac, dst_mac, ap_mac)) {
+            if (is_ap_to_client(src_mac, ap_mac)) {
                 return -1; // Should be from client
             }
             hs->msg4_received = 1;
